@@ -1,0 +1,8 @@
+/.cabal-sandbox
+/dist
+/dist-newstyle
+/cabal.sandbox.config
+/*.swp
+/*.iml
+/result*
+/.stack-work
