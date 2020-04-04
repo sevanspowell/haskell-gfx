@@ -19,19 +19,26 @@ vertexShaderSource :: String
 vertexShaderSource = [r|
   #version 330 core
   layout (location = 0) in vec3 position;
+  layout (location = 1) in vec3 color;
+
+  out vec3 ourColor; // Output a color to the fragment shader
+
   void main()
   {
     gl_Position = vec4(position.x, position.y, position.z, 1.0);
+    ourColor = color; // Set ourColor to the input color we got from the vertex data
   }
   |]
 
 fragmentShaderSource :: String
 fragmentShaderSource = [r|
   # version 330 core
+  in vec3 ourColor;
   out vec4 color;
+
   void main()
   {
-    color = vec4(1.0f, 0.5f, 0.2f, 1.0f);
+    color = vec4(ourColor, 1.0f);
   }
   |]
 
@@ -58,8 +65,13 @@ main = do
       (x, y) <- GLFW.getFramebufferSize window
       glViewport 0 0 (fromIntegral x) (fromIntegral y)
 
-      vao <- compileAndRender
+      -- Link the two shaders into a single GPU program
+      shaderProgram <- printFailure =<< programFromSources vertexShaderSource fragmentShaderSource
+
+      vao <- setup
       -- glPolygonMode GL_FRONT_AND_BACK GL_LINE
+
+      -- ourColor <- newCString "ourColor"
 
       -- Enter our main loop
       let loop = do
@@ -72,8 +84,10 @@ main = do
               glClear GL_COLOR_BUFFER_BIT
 
               -- Draw the triangle
+              glUseProgram shaderProgram 
               glBindVertexArray vao
-              glDrawElements GL_TRIANGLES 6 GL_UNSIGNED_INT nullPtr
+              glDrawArrays GL_TRIANGLES 0 3
+              -- glDrawElements GL_TRIANGLES 6 GL_UNSIGNED_INT nullPtr
               glBindVertexArray 0
 
               -- Swap buffers and go again
@@ -134,44 +148,18 @@ printFailure :: Either String GLuint -> IO GLuint
 printFailure (Right x)  = pure x
 printFailure (Left err) = putStrLn err >> pure 0
 
-compileAndRender = do
-  -- Vertex shader compile and load
-  vertexShader <- printFailure =<< compileShader GL_VERTEX_SHADER vertexShaderSource
-
-  -- Fragment shader compile and load
-  fragmentShader <- printFailure =<< compileShader GL_FRAGMENT_SHADER fragmentShaderSource
-
-  -- Link the two shaders into a single GPU program
-  shaderProgram <- glCreateProgram
-  glAttachShader shaderProgram vertexShader
-  glAttachShader shaderProgram fragmentShader
-  glLinkProgram shaderProgram
-  linkingSuccessP <- malloc
-  glGetProgramiv shaderProgram GL_LINK_STATUS linkingSuccessP
-  linkingSuccess <- peek linkingSuccessP
-  when (linkingSuccess == GL_FALSE) $ do
-    putStrLn "Program Linking Error:"
-    let infoLength = 512
-    resultP <- malloc
-    infoLog <- mallocArray (fromIntegral infoLength)
-    glGetProgramInfoLog shaderProgram (fromIntegral infoLength) resultP infoLog
-    result <- fromIntegral <$> peek resultP
-    logBytes <- peekArray result infoLog
-    putStrLn (toEnum.fromEnum <$> logBytes)
-
-  -- Cleanup the sub-programs now that our complete shader program is ready
-  glDeleteShader vertexShader
-  glDeleteShader fragmentShader
-
-  glUseProgram shaderProgram
-
+setup = do
   let
     vertices :: [GLfloat]
-    vertices = [  0.5,  0.5, 0.0 -- Top right
-               ,  0.5, -0.5, 0.0 -- Bottom right
-               , -0.5, -0.5, 0.0 -- Bottom left
-               , -0.5,  0.5, 0.0 -- Top left
-               ]
+    -- vertices = [  0.5,  0.5, 0.0 -- Top right
+    --            ,  0.5, -0.5, 0.0 -- Bottom right
+    --            , -0.5, -0.5, 0.0 -- Bottom left
+    --            , -0.5,  0.5, 0.0 -- Top left
+    --            ]
+    vertices = [ 0.5, (-0.5), 0.0, 1.0, 0.0, 0.0
+               , (-0.5), (-0.5), 0.0, 0.0, 1.0, 0.0
+               , 0.0, 0.5, 0.0, 0.0, 0.0, 1.0
+               ];
     verticesSize = fromIntegral $ sizeOf (0.0 :: GLfloat) * (length vertices)
   verticesP <- newArray vertices
 
@@ -204,11 +192,71 @@ compileAndRender = do
   glBufferData GL_ELEMENT_ARRAY_BUFFER indicesSize (castPtr indicesP) GL_STATIC_DRAW
 
   -- Assign the attribute pointer information
-  let threeFloats = fromIntegral $ sizeOf (0.0 :: GLfloat) * 3
-  glVertexAttribPointer 0 3 GL_FLOAT GL_FALSE threeFloats nullPtr
+  let floatSize = (fromIntegral $ sizeOf (0.0 :: GLfloat)) :: GLsizei
+  -- position attribute
+  glVertexAttribPointer 0 3 GL_FLOAT GL_FALSE (6*floatSize) nullPtr
   glEnableVertexAttribArray 0
+  -- color attribute
+  let threeFloatOffset = castPtr $ nullPtr `plusPtr` (fromIntegral $ 3*floatSize)
+  glVertexAttribPointer 1 3 GL_FLOAT GL_FALSE (6*floatSize) threeFloatOffset
+  glEnableVertexAttribArray 1
 
   -- Unbind our vertex array object to prevent accidental changes
   glBindVertexArray 0
 
   pure vao
+
+-- | Link a vertex shader object and a fragment shader object into a
+-- new program. If there is a linking error, the log is returned (Left
+-- err) and the program is deleted.
+linkProgram :: GLuint -> GLuint -> IO (Either String GLuint)
+linkProgram vertexId fragmentId = do
+  programId <- glCreateProgram
+  glAttachShader programId vertexId
+  glAttachShader programId fragmentId
+  glLinkProgram programId
+  success <- alloca $ \successP -> do
+    glGetProgramiv programId GL_LINK_STATUS successP
+    peek successP
+  if success == GL_TRUE
+  then pure $ Right programId
+  else do
+    -- How many bytes the info log should be (including the '\0')
+    logLen <- alloca $ \logLenP -> do
+      glGetProgramiv programId GL_INFO_LOG_LENGTH logLenP
+      peek logLenP
+    -- Space for the info log
+    logBytes <- allocaBytes (fromIntegral logLen) $ \logP -> do
+      -- Space for the log reading result
+      alloca $ \resultP -> do
+        -- Try to obtain the log bytes
+        glGetProgramInfoLog programId logLen resultP logP
+        -- This is how many bytes we actually go
+        result <- fromIntegral <$> peek resultP
+        peekArray result logP
+    -- Delete the program object and return the log
+    glDeleteProgram programId
+    pure . Left $ "Program Link Error: " <> ((toEnum . fromEnum) <$> logBytes)
+
+programFromSources :: String -> String -> IO (Either String GLuint)
+programFromSources vertexSource fragmentSource = do
+  eitherVertShader <- compileShader GL_VERTEX_SHADER vertexShaderSource
+  case eitherVertShader of
+    Left e -> pure $ Left e
+    Right vertShader -> do
+      eitherFragShader <- compileShader GL_FRAGMENT_SHADER fragmentSource
+      case eitherFragShader of
+        Left e -> do
+          glDeleteShader vertShader
+          pure $ Left e
+        Right fragShader -> do
+          eitherProgram <- linkProgram vertShader fragShader
+          glDeleteShader vertShader
+          glDeleteShader fragShader
+          pure eitherProgram
+
+-- Streaming (or eager?) interface for retrieving OpenGL logs
+-- | LogProgramLinking
+-- | LogShaderCompilation
+
+-- Handle interface that prevents using deleted handles?
