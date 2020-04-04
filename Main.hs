@@ -7,7 +7,7 @@ import qualified Graphics.UI.GLFW as GLFW
 import Graphics.GL.Core33
 import Graphics.GL.Types
 import Foreign
-import Foreign.C.String (newCAStringLen)
+import Foreign.C.String (newCAStringLen, withCAStringLen)
 
 import Text.RawString.QQ
 
@@ -59,6 +59,7 @@ main = do
       glViewport 0 0 (fromIntegral x) (fromIntegral y)
 
       vao <- compileAndRender
+      -- glPolygonMode GL_FRONT_AND_BACK GL_LINE
 
       -- Enter our main loop
       let loop = do
@@ -72,7 +73,7 @@ main = do
 
               -- Draw the triangle
               glBindVertexArray vao
-              glDrawArrays GL_TRIANGLES 0 3
+              glDrawElements GL_TRIANGLES 6 GL_UNSIGNED_INT nullPtr
               glBindVertexArray 0
 
               -- Swap buffers and go again
@@ -81,48 +82,64 @@ main = do
       loop
             
   GLFW.terminate
-  
+
+-- | Compile a shader of the given type and return either a
+-- compilation error or a shader ID. In the case of failure, the
+-- shader is deleted.
+compileShader :: GLenum -> String -> IO (Either String GLuint)
+compileShader shaderType shaderSource = do
+  -- New shader object
+  shaderId <- glCreateShader shaderType
+
+  -- Assign the source to the shader object
+  withCAStringLen shaderSource $ \(strP, strLen) ->
+    withArray [strP] $ \linesPtrsPtr ->
+      withArray [fromIntegral strLen] $ \lengthsPtr ->
+        glShaderSource shaderId 1 linesPtrsPtr lengthsPtr
+
+  -- Compile shader and check success
+  glCompileShader shaderId
+  success <- alloca $ \successP -> do
+    glGetShaderiv shaderId GL_COMPILE_STATUS successP
+    peek successP
+
+  if (success == GL_TRUE)
+  then pure $ Right shaderId
+  else do
+    -- How many bytes the info log should be (including the '\0')
+    logLen <- alloca $ \logLenP -> do
+      glGetShaderiv shaderId GL_INFO_LOG_LENGTH logLenP
+      peek logLenP
+
+    -- Space for the info log
+    logBytes <- allocaBytes (fromIntegral logLen) $ \logP -> do
+      -- Space for the log reading result
+      alloca $ \resultP -> do
+        -- Try to obtain the log bytes
+        glGetShaderInfoLog shaderId logLen resultP logP
+        -- This is how many bytes we actually got
+        result <- fromIntegral <$> peek resultP
+        peekArray result logP
+
+    -- Delete the shader object and return the log
+    glDeleteShader shaderId
+    let shaderTypeStr = case shaderType of
+          GL_VERTEX_SHADER -> "Vertex"
+          GL_GEOMETRY_SHADER -> "Geometry"
+          GL_FRAGMENT_SHADER -> "Fragment"
+          _ -> "Unknown Type"
+    pure . Left $ shaderTypeStr <> " Shader Error: " <> ((toEnum . fromEnum) <$> logBytes)
+
+printFailure :: Either String GLuint -> IO GLuint
+printFailure (Right x)  = pure x
+printFailure (Left err) = putStrLn err >> pure 0
 
 compileAndRender = do
   -- Vertex shader compile and load
-  vertexShader <- glCreateShader GL_VERTEX_SHADER
-  (sourceP, len) <- newCAStringLen vertexShaderSource
-  linesPtrsPtr <- newArray [sourceP]
-  lengthsPtr <- newArray [fromIntegral len]
-  glShaderSource vertexShader 1 linesPtrsPtr lengthsPtr
-  glCompileShader vertexShader
-  vertexSuccessP <- malloc
-  glGetShaderiv vertexShader GL_COMPILE_STATUS vertexSuccessP
-  vertexSuccess <- peek vertexSuccessP
-  when (vertexSuccess == GL_FALSE) $ do
-    putStrLn "Vertex Shader Compile Error:"
-    let infoLength = 512
-    resultP <- malloc
-    infoLog <- mallocArray (fromIntegral infoLength)
-    glGetShaderInfoLog vertexShader (fromIntegral infoLength) resultP infoLog
-    result <- fromIntegral <$> peek resultP
-    logBytes <- peekArray result infoLog
-    putStrLn (toEnum.fromEnum <$> logBytes)
+  vertexShader <- printFailure =<< compileShader GL_VERTEX_SHADER vertexShaderSource
 
   -- Fragment shader compile and load
-  fragmentShader <- glCreateShader GL_FRAGMENT_SHADER
-  (sourceP, len) <- newCAStringLen fragmentShaderSource
-  linesPtrsPtr <- newArray [sourceP]
-  lengthsPtr <- newArray [fromIntegral len]
-  glShaderSource fragmentShader 1 linesPtrsPtr lengthsPtr
-  glCompileShader fragmentShader
-  fragmentSuccessP <- malloc
-  glGetShaderiv fragmentShader GL_COMPILE_STATUS fragmentSuccessP
-  fragmentSuccess <- peek fragmentSuccessP
-  when (fragmentSuccess == GL_FALSE) $ do
-    putStrLn "Fragment Shader Compile Error:"
-    let infoLength = 512
-    resultP <- malloc
-    infoLog <- mallocArray (fromIntegral infoLength)
-    glGetShaderInfoLog vertexShader (fromIntegral infoLength) resultP infoLog
-    result <- fromIntegral <$> peek resultP
-    logBytes <- peekArray result infoLog
-    putStrLn (toEnum.fromEnum <$> logBytes)
+  fragmentShader <- printFailure =<< compileShader GL_FRAGMENT_SHADER fragmentShaderSource
 
   -- Link the two shaders into a single GPU program
   shaderProgram <- glCreateProgram
@@ -150,12 +167,21 @@ compileAndRender = do
 
   let
     vertices :: [GLfloat]
-    vertices = [ (-0.5), (-0.5), 0.0
-               , 0.5   , (-0.5), 0.0
-               , 0.0   , 0.5   , 0.0
+    vertices = [  0.5,  0.5, 0.0 -- Top right
+               ,  0.5, -0.5, 0.0 -- Bottom right
+               , -0.5, -0.5, 0.0 -- Bottom left
+               , -0.5,  0.5, 0.0 -- Top left
                ]
     verticesSize = fromIntegral $ sizeOf (0.0 :: GLfloat) * (length vertices)
   verticesP <- newArray vertices
+
+  let
+    indices :: [GLuint]
+    indices = [ 0, 1, 3 -- First Triangle
+              , 1, 2, 3 -- Second Triangle
+              ]
+    indicesSize = fromIntegral $ sizeOf (0 :: GLuint) * (length indices)
+  indicesP <- newArray indices
 
   -- Setup a vertex array object
   vaoP <- malloc
@@ -169,6 +195,13 @@ compileAndRender = do
   vbo <- peek vboP
   glBindBuffer GL_ARRAY_BUFFER vbo
   glBufferData GL_ARRAY_BUFFER verticesSize (castPtr verticesP) GL_STATIC_DRAW
+
+  -- Setup the element buffer object and send it data
+  eboP <- malloc
+  glGenBuffers 1 eboP
+  ebo <- peek eboP
+  glBindBuffer GL_ELEMENT_ARRAY_BUFFER ebo
+  glBufferData GL_ELEMENT_ARRAY_BUFFER indicesSize (castPtr indicesP) GL_STATIC_DRAW
 
   -- Assign the attribute pointer information
   let threeFloats = fromIntegral $ sizeOf (0.0 :: GLfloat) * 3
