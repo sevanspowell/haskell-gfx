@@ -21,6 +21,7 @@ executable haskell-gfx
   build-depends:       base
                      , gl
                      , GLFW-b
+                     , raw-strings-qq
   -- hs-source-dirs:
   default-language:    Haskell2010
 
