@@ -7,7 +7,7 @@ import qualified Graphics.UI.GLFW as GLFW
 import Graphics.GL.Core33
 import Graphics.GL.Types
 import Foreign
-import Foreign.C.String (newCAStringLen, withCAStringLen)
+import Foreign.C.String (newCAStringLen, withCAStringLen, newCString)
 
 import Text.RawString.QQ
 
@@ -19,26 +19,23 @@ vertexShaderSource :: String
 vertexShaderSource = [r|
   #version 330 core
   layout (location = 0) in vec3 position;
-  layout (location = 1) in vec3 color;
-
-  out vec3 ourColor; // Output a color to the fragment shader
 
   void main()
   {
-    gl_Position = vec4(position.x, position.y, position.z, 1.0);
-    ourColor = color; // Set ourColor to the input color we got from the vertex data
+    gl_Position = vec4(position, 1.0);
   }
   |]
 
 fragmentShaderSource :: String
 fragmentShaderSource = [r|
   # version 330 core
-  in vec3 ourColor;
   out vec4 color;
+
+  uniform vec4 ourColor;
 
   void main()
   {
-    color = vec4(ourColor, 1.0f);
+    color = ourColor;
   }
   |]
 
@@ -71,7 +68,7 @@ main = do
       vao <- setup
       -- glPolygonMode GL_FRONT_AND_BACK GL_LINE
 
-      -- ourColor <- newCString "ourColor"
+      ourColor <- newCString "ourColor"
 
       -- Enter our main loop
       let loop = do
@@ -79,15 +76,24 @@ main = do
             when shouldContinue $ do
               -- Event poll
               GLFW.pollEvents
+
+              -- Time
+              timeValue <- maybe 0 realToFrac <$> GLFW.getTime
+              let greenValue = ((sin timeValue) / 2) + 0.5
+
               -- Clear the screen
               glClearColor 0.2 0.3 0.3 1.0
               glClear GL_COLOR_BUFFER_BIT
 
-              -- Draw the triangle
+              -- Setup the uniform
               glUseProgram shaderProgram 
+              vertexColorLocation <- glGetUniformLocation shaderProgram ourColor
+              glUniform4f vertexColorLocation 0.0 greenValue 0.0 1.0
+
+              -- Draw our rectangle
               glBindVertexArray vao
-              glDrawArrays GL_TRIANGLES 0 3
-              -- glDrawElements GL_TRIANGLES 6 GL_UNSIGNED_INT nullPtr
+              -- glDrawArrays GL_TRIANGLES 0 3
+              glDrawElements GL_TRIANGLES 6 GL_UNSIGNED_INT nullPtr
               glBindVertexArray 0
 
               -- Swap buffers and go again
@@ -96,6 +102,59 @@ main = do
       loop
             
   GLFW.terminate
+
+setup = do
+  let
+    vertices :: [GLfloat]
+    vertices = [  0.5,  0.5, 0.0 -- Top right
+               ,  0.5, -0.5, 0.0 -- Bottom right
+               , -0.5, -0.5, 0.0 -- Bottom left
+               , -0.5,  0.5, 0.0 -- Top left
+               ]
+    -- vertices = [ 0.5, (-0.5), 0.0, 1.0, 0.0, 0.0
+    --            , (-0.5), (-0.5), 0.0, 0.0, 1.0, 0.0
+    --            , 0.0, 0.5, 0.0, 0.0, 0.0, 1.0
+    --            ];
+    verticesSize = fromIntegral $ sizeOf (0.0 :: GLfloat) * (length vertices)
+  verticesP <- newArray vertices
+
+  let
+    indices :: [GLuint]
+    indices = [ 0, 1, 3 -- First Triangle
+              , 1, 2, 3 -- Second Triangle
+              ]
+    indicesSize = fromIntegral $ sizeOf (0 :: GLuint) * (length indices)
+  indicesP <- newArray indices
+
+  -- Setup a vertex array object
+  vaoP <- malloc
+  glGenVertexArrays 1 vaoP
+  vao <- peek vaoP
+  glBindVertexArray vao
+
+  -- Setup a vertex buffer object and send it data
+  vboP <- malloc
+  glGenBuffers 1 vboP
+  vbo <- peek vboP
+  glBindBuffer GL_ARRAY_BUFFER vbo
+  glBufferData GL_ARRAY_BUFFER verticesSize (castPtr verticesP) GL_STATIC_DRAW
+
+  -- Setup the element buffer object and send it data
+  eboP <- malloc
+  glGenBuffers 1 eboP
+  ebo <- peek eboP
+  glBindBuffer GL_ELEMENT_ARRAY_BUFFER ebo
+  glBufferData GL_ELEMENT_ARRAY_BUFFER indicesSize (castPtr indicesP) GL_STATIC_DRAW
+
+  -- Assign the attribute pointer information
+  let threeFloats = fromIntegral $ sizeOf (0.0 :: GLfloat) * 3
+  glVertexAttribPointer 0 3 GL_FLOAT GL_FALSE threeFloats nullPtr
+  glEnableVertexAttribArray 0
+
+  -- Unbind our vertex array object to prevent accidental changes
+  glBindVertexArray 0
+
+  pure vao
 
 -- | Compile a shader of the given type and return either a
 -- compilation error or a shader ID. In the case of failure, the
@@ -147,64 +206,6 @@ compileShader shaderType shaderSource = do
 printFailure :: Either String GLuint -> IO GLuint
 printFailure (Right x)  = pure x
 printFailure (Left err) = putStrLn err >> pure 0
-
-setup = do
-  let
-    vertices :: [GLfloat]
-    -- vertices = [  0.5,  0.5, 0.0 -- Top right
-    --            ,  0.5, -0.5, 0.0 -- Bottom right
-    --            , -0.5, -0.5, 0.0 -- Bottom left
-    --            , -0.5,  0.5, 0.0 -- Top left
-    --            ]
-    vertices = [ 0.5, (-0.5), 0.0, 1.0, 0.0, 0.0
-               , (-0.5), (-0.5), 0.0, 0.0, 1.0, 0.0
-               , 0.0, 0.5, 0.0, 0.0, 0.0, 1.0
-               ];
-    verticesSize = fromIntegral $ sizeOf (0.0 :: GLfloat) * (length vertices)
-  verticesP <- newArray vertices
-
-  let
-    indices :: [GLuint]
-    indices = [ 0, 1, 3 -- First Triangle
-              , 1, 2, 3 -- Second Triangle
-              ]
-    indicesSize = fromIntegral $ sizeOf (0 :: GLuint) * (length indices)
-  indicesP <- newArray indices
-
-  -- Setup a vertex array object
-  vaoP <- malloc
-  glGenVertexArrays 1 vaoP
-  vao <- peek vaoP
-  glBindVertexArray vao
-
-  -- Setup a vertex buffer object and send it data
-  vboP <- malloc
-  glGenBuffers 1 vboP
-  vbo <- peek vboP
-  glBindBuffer GL_ARRAY_BUFFER vbo
-  glBufferData GL_ARRAY_BUFFER verticesSize (castPtr verticesP) GL_STATIC_DRAW
-
-  -- Setup the element buffer object and send it data
-  eboP <- malloc
-  glGenBuffers 1 eboP
-  ebo <- peek eboP
-  glBindBuffer GL_ELEMENT_ARRAY_BUFFER ebo
-  glBufferData GL_ELEMENT_ARRAY_BUFFER indicesSize (castPtr indicesP) GL_STATIC_DRAW
-
-  -- Assign the attribute pointer information
-  let floatSize = (fromIntegral $ sizeOf (0.0 :: GLfloat)) :: GLsizei
-  -- position attribute
-  glVertexAttribPointer 0 3 GL_FLOAT GL_FALSE (6*floatSize) nullPtr
-  glEnableVertexAttribArray 0
-  -- color attribute
-  let threeFloatOffset = castPtr $ nullPtr `plusPtr` (fromIntegral $ 3*floatSize)
-  glVertexAttribPointer 1 3 GL_FLOAT GL_FALSE (6*floatSize) threeFloatOffset
-  glEnableVertexAttribArray 1
-
-  -- Unbind our vertex array object to prevent accidental changes
-  glBindVertexArray 0
-
-  pure vao
 
 -- | Link a vertex shader object and a fragment shader object into a
 -- new program. If there is a linking error, the log is returned (Left
